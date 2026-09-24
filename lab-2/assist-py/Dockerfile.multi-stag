@@ -1,0 +1,13 @@
+FROM python:3.11-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+FROM python:3.11-slim AS runtime
+LABEL maintainer="ter-stepanyan@lab.local"
+LABEL version="1.0"
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY app/ ./app/
+EXPOSE 5527
+CMD ["/opt/venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5527"]
