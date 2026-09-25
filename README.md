@@ -80,6 +80,27 @@ docker ps --filter "ter-stepanyan-alpine"
 _______
 ## Этап 3. Жизненный цикл контейнера
 ### Задание 3.1. Отслеживание всех состояний через последовательные команды
+```bash
+docker create --name ter-stepanyan-nginx nginx:alpine
+docker start --name ter-stepanyan-nginx nginx:alpine
+docker stop --name ter-stepanyan-nginx nginx:alpine
+docker restart --name ter-stepanyan-nginx nginx:alpine
+docker kill --name ter-stepanyan-nginx nginx:alpine
+docker rm --name ter-stepanyan-nginx nginx:alpine
+```
+_______
+### Задание 3.2. Фиксация переходов состояний
+`docker create` - `STATUS:Created` </br>
+`docker start` - `STATUS:Up` </br>
+`docker stop` - `STATUS:Exited` </br>
+`docker restart` - `STATUS:Up` </br>
+`docker kill` - `STATUS:Exited` </br>
+`docker rm` - `STATUS:`
 
+`docker stop` отправляет сигнал `SIGTERM`
+
+docker kill принудительно завершает процесс БД сигналом SIGKILL. База не успевает завершить работу, незавершённые операции прерываются, а данные, которые ещё не были надёжно записаны на диск, могут потеряться. 
+
+Если выполнить docker rm для запущенного контейнера, он не удалится и Docker выдаст ошибку. Чтобы выполнить принудительное удаление, нужно добавить флаг -f.
 
 
