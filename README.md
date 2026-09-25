@@ -102,5 +102,59 @@ _______
 docker kill принудительно завершает процесс БД сигналом SIGKILL. База не успевает завершить работу, незавершённые операции прерываются, а данные, которые ещё не были надёжно записаны на диск, могут потеряться. 
 
 Если выполнить docker rm для запущенного контейнера, он не удалится и Docker выдаст ошибку. Чтобы выполнить принудительное удаление, нужно добавить флаг -f.
+_____
+## Этап 4. Диагностика реального сервиса
+### Задание 4.1. Запуск с ошибкой
+
+```bash
+docker run -d \
+  --name ter-stepanyan-pg-broken \
+  -p 5527:5432 \
+  postgres:15
+```
+Диагностика:
+```bash
+# Статус контейнера
+docker ps -a --filter "name=ter-stepanyan-pg"
+
+# Логи с временной меткой (последние 20 строк)
+docker logs --timestamps ter-stepanyan-pg-broken 2>&1 | tail -20
+
+# Код завершения
+docker inspect ter-stepanyan-pg-broken --format='{{.State.ExitCode}}'
+```
+_______
+### Задание 4.2. Исправление и проверка
+```bash
+docker run -d \
+  --name ter-stepanyan-pg-fixed \
+  -e POSTGRES_PASSWORD=Pass_5527 \
+  -e POSTGRES_USER=user_467697 \
+  -p 5527:5432 \
+  postgres:15
+```
+Проверка работоспособности:
+```bash
+# Ждём инициализацию БД
+sleep 15
+
+# Выполняем запрос к БД
+docker exec ter-stepanyan-pg-fixed psql -U user_467697 -c "SELECT version();"
+```
+________
+### Задание 4.3. Финальный артефакт
+```bash
+echo "=== Практика №1: $(date '+%Y-%m-%d %H:%M:%S') ===" && \
+echo "Студент: $(whoami)@$(hostname)" && \
+docker ps --filter "name=ter-stepanyan-pg-fixed" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+_________
+```bash
+=== Практика №1: 2026-09-24 01:30:37 ===
+Студент: lildrake@linux-lab
+NAMES                    STATUS         PORTS
+ter-stepanyan-pg-fixed   Up 5 minutes   0.0.0.0:5527->5432/tcp, [::]:5527->5432/tcp
+```
+
 
 
