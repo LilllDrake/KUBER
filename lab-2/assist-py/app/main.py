@@ -2,18 +2,27 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import os
 import httpx
+import psycopg  # добавлено: драйвер PostgreSQL
 
 app = FastAPI(title="Personal Assistant")
 
 OWNER = os.getenv("APP_OWNER", "anonymous")
 SECRET_KEY = os.getenv("APP_SECRET", "default_secret")
+DATABASE_URL = os.getenv("DATABASE_URL")  # добавлено
 
 
 class Note(BaseModel):
     text: str
 
 
-notes: list[str] = []
+def db():
+    # добавлено: подключение к БД и таблица для заметок
+    conn = psycopg.connect(DATABASE_URL)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notes "
+        "(id SERIAL PRIMARY KEY, text TEXT)"
+    )
+    return conn
 
 
 @app.get("/")
@@ -112,11 +121,21 @@ async def weather(city: str):
 
 @app.post("/notes")
 async def create_note(note: Note):
-    notes.append(note.text)
-    return {"status": "saved", "note_id": len(notes) - 1, "total": len(notes)}
+    # изменено: пишем в таблицу, а не в список
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO notes (text) VALUES (%s)",
+            (note.text,),
+        )
+        cur = conn.execute("SELECT count(*) FROM notes")
+        total = cur.fetchone()[0]
+    return {"status": "saved", "note_id": total - 1, "total": total}
 
 
 @app.get("/notes")
 async def list_notes():
+    # изменено: читаем из таблицы, а не из списка
+    with db() as conn:
+        cur = conn.execute("SELECT text FROM notes ORDER BY id")
+        notes = [row[0] for row in cur.fetchall()]
     return {"notes": notes, "count": len(notes)}
-
