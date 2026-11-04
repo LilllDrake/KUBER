@@ -1,14 +1,20 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import os
+import json
 import httpx
-import psycopg  # добавлено: драйвер PostgreSQL
+import psycopg
+import redis
 
 app = FastAPI(title="Personal Assistant")
 
 OWNER = os.getenv("APP_OWNER", "anonymous")
 SECRET_KEY = os.getenv("APP_SECRET", "default_secret")
-DATABASE_URL = os.getenv("DATABASE_URL")  # добавлено
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6467/0")
+CACHE_TTL = int(os.getenv("CACHE_TTL", "120"))
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 
 class Note(BaseModel):
@@ -16,7 +22,6 @@ class Note(BaseModel):
 
 
 def db():
-    # добавлено: подключение к БД и таблица для заметок
     conn = psycopg.connect(DATABASE_URL)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS notes "
@@ -77,6 +82,14 @@ WEATHER_CODES: dict[int, str] = {
 
 @app.get("/weather/{city}")
 async def weather(city: str):
+    cache_key = f"weather:{OWNER}:{city.lower()}"
+
+    cached = redis_client.get(cache_key)
+    if cached:
+        data = json.loads(cached)
+        data["source"] = "cache"
+        return data
+
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             geo_resp = await client.get(
@@ -106,7 +119,7 @@ async def weather(city: str):
 
             code = weather_data.get("weather_code", -1)
 
-            return {
+            result = {
                 "city": city_name,
                 "country": country,
                 "coordinates": {"lat": lat, "lon": lon},
@@ -114,14 +127,28 @@ async def weather(city: str):
                 "humidity_pct": weather_data["relative_humidity_2m"],
                 "wind_km_h": weather_data["wind_speed_10m"],
                 "condition": WEATHER_CODES.get(code, f"Code {code}"),
+                "source": "api",
             }
     except Exception as e:
         return {"error": f"Failed to get weather: {type(e).__name__}: {e}"}
 
+    redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
+    return result
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    keys = redis_client.keys(f"weather:{OWNER}:*")
+    return {
+        "owner": OWNER,
+        "ttl_seconds": CACHE_TTL,
+        "cached_count": len(keys),
+        "cached_cities": sorted(k.split(":")[-1] for k in keys),
+    }
+
 
 @app.post("/notes")
 async def create_note(note: Note):
-    # изменено: пишем в таблицу, а не в список
     with db() as conn:
         conn.execute(
             "INSERT INTO notes (text) VALUES (%s)",
@@ -134,7 +161,6 @@ async def create_note(note: Note):
 
 @app.get("/notes")
 async def list_notes():
-    # изменено: читаем из таблицы, а не из списка
     with db() as conn:
         cur = conn.execute("SELECT text FROM notes ORDER BY id")
         notes = [row[0] for row in cur.fetchall()]
