@@ -1,0 +1,437 @@
+\reportelement{Введение}
+
+Цель работы --- перенести запуск приложения, PostgreSQL и Redis в Docker
+Compose, добавить кэширование ответов приложения в Redis и попробовать
+масштабирование сервиса.
+
+Задачи:
+\begin{itemize}
+  \item вынести персональные параметры в файл \cmd|.env| и описать стек
+        в \cmd|docker-compose.yml|;
+  \item настроить порядок запуска сервисов через \cmd|healthcheck| и
+        \cmd|depends_on|;
+  \item добавить сервис Redis и кэширование эндпоинта
+        \cmd|/weather/{city}|;
+  \item проверить работу кэша, сетей и томов;
+  \item запустить несколько экземпляров приложения и убедиться, что они
+        используют общий кэш.
+\end{itemize}
+
+Работа выполнялась на сервере linux-lab, Docker версии 29.1.3 и Docker
+Compose версии 2.40.3~\cite{docker-docs, compose-docs}.
+
+\reportelement{Персональные параметры}
+
+Персональные параметры приведены в таблице~\ref{tab:parameters}.
+
+\begin{table}[H]
+  \caption{Персональные параметры}\label{tab:parameters}
+  \centering
+  \begin{tabularx}{\textwidth}{|p{0.52\textwidth}|X|}
+    \hline
+    Параметр & Значение\\ \hline
+    Номер ИСУ & 467697\\ \hline
+    Персональный порт (PostgreSQL, \cmd|PG_PORT|) & 5527\\ \hline
+    Персональный порт (Redis, \cmd|REDIS_PORT|) & 6467\\ \hline
+    Персональный порт (приложение, \cmd|APP_PORT|) & 8097\\ \hline
+    Персональный префикс & ter-stepanyan\\ \hline
+    Секретный ключ & secret97ter-stepanyan\\ \hline
+    Имя базы данных & ter-stepanyan97\\ \hline
+  \end{tabularx}
+\end{table}
+
+
+Репозиторий с результатом (ветка \cmd|lab-4|): \url{\RepositoryURL}.
+
+\chapter{Основная часть}
+
+\section{Этап 1. Подготовка проекта для Docker Compose}
+
+От ветки \cmd|lab-3| создана ветка \cmd|lab-4|. В корне проекта
+\cmd|solutions/assist-py| создан файл \cmd|.env| с персональными
+переменными (рисунок~\ref{fig:1-1}).  Файл содержит пароли, поэтому он добавлен в
+\cmd|.gitignore|, а в репозиторий помещён \cmd|.env.example| с теми
+же переменными без реальных паролей (приложение~Б).
+
+\reportscreenshot{fig-1-1.png}{Заполнение файла .env}{fig:1-1}
+
+Создан файл \cmd|docker-compose.yml| с двумя сервисами: \cmd|db|
+(PostgreSQL) и \cmd|app| (приложение). Полное содержимое итогового
+файла приведено в приложении~А. Основные решения:
+\begin{itemize}
+  \item PostgreSQL запускается командой \cmd|postgres -p
+        ${PG_PORT}|, поэтому внутри контейнера он слушает
+        персональный порт 5527;
+  \item данные базы хранятся в именованном томе
+        \cmd|ter-stepanyan-pgdata|;
+  \item у \cmd|db| задан \cmd|healthcheck| с командой
+        \cmd|pg_isready|, которая проверяет, что база готова
+        принимать подключения на порту 5527;
+  \item приложение собирается из \cmd|Dockerfile.optimized|, слушает
+        порт 8097, и этот порт пробрасывается на хост;
+  \item приложение подключается к базе по строке
+        \cmd|DATABASE_URL|, в которой хостом указано имя сервиса
+        \cmd|db|, а не \cmd|localhost|: у каждого контейнера свой
+        сетевой стек, и \cmd|localhost| внутри контейнера указывает на
+        сам контейнер;
+  \item папка \cmd|config| подключена как bind mount в режиме только
+        для чтения, как в ЛР~№3;
+  \item приложение запускается только после того, как база пройдёт
+        проверку здоровья (\cmd|depends_on| с
+        \cmd|condition: service_healthy|).
+\end{itemize}
+
+Запуск всех сервисов командой \cmd|docker compose up -d --build|
+показан на рисунке~\ref{fig:1-2}. При первом запуске Compose добавил к
+именам сети и тома префикс проекта \cmd|assist-py_| (имя папки
+проекта). Чтобы сеть и том назывались ровно
+\cmd|ter-stepanyan-backend| и \cmd|ter-stepanyan-pgdata|, в
+описание сети и тома позже добавлен ключ \cmd|name|.
+
+\reportscreenshot{fig-1-2.png}{Запуск сервисов через Docker Compose}{fig:1-2}
+
+Статус сервисов и логи приложения представлены на
+рисунке~\ref{fig:1-3}. Оба контейнера в состоянии \cmd|healthy|,
+приложение доступно на персональном порту 8097.
+
+\reportscreenshot{fig-1-3.png}{Статус сервисов и логи приложения}{fig:1-3}
+
+В логах базы данных (рисунок~\ref{fig:1-4}) видно, что PostgreSQL
+слушает персональный порт 5527.
+
+\reportscreenshot{fig-1-4.png}{Логи базы данных}{fig:1-4}
+
+Приложение отвечает на запросы \cmd|/| и \cmd|/health|
+(рисунок~\ref{fig:1-5}), в ответе указан владелец
+\cmd|ter-stepanyan|.
+
+\reportscreenshot{fig-1-5.png}{Проверка ответа приложения}{fig:1-5}
+
+\section{Этап 2. Добавление Redis для кэширования погоды}
+
+В \cmd|docker-compose.yml| добавлен сервис \cmd|redis|
+(рисунок~\ref{fig:2-1}) из образа \cmd|redis:7-alpine|. Он подключён к
+той же сети \cmd|ter-stepanyan-backend|, а его порт опубликован на хосте
+под персональным номером 6467. Проверка здоровья выполняется командой
+\cmd|redis-cli ping|.
+
+\reportscreenshot{fig-2-1.png}{Сервис redis в docker-compose.yml}{fig:2-1}
+
+Приложение теперь зависит и от базы, и от Redis
+(рисунок~\ref{fig:2-2}): Compose запустит его только после того, как оба
+сервиса станут \cmd|healthy|.
+
+\reportscreenshot{fig-2-2.png}{Зависимость приложения от db и redis}{fig:2-2}
+
+В \cmd|app/main.py| добавлено подключение к Redis
+(рисунок~\ref{fig:2-3}), а в \cmd|requirements.txt| --- библиотека
+\cmd|redis|. Адрес Redis и время жизни кэша приложение берёт из
+переменных окружения \cmd|REDIS_URL| и \cmd|CACHE_TTL|.
+
+\reportscreenshot{fig-2-3.png}{Подключение к Redis в main.py}{fig:2-3}
+
+Эндпоинт \cmd|/weather/{city}| работает так:
+\begin{enumerate}
+  \item приложение формирует ключ вида
+        \cmd|weather:ter-stepanyan:moscow| и запрашивает его в Redis;
+  \item если значение найдено, ответ возвращается из кэша с полем
+        \cmd|"source": "cache"| без обращения к внешнему API;
+  \item если значения нет, приложение запрашивает погоду у API
+        open-meteo, возвращает ответ с \cmd|"source": "api"| и
+        сохраняет его в Redis командой \cmd|SETEX| на
+        \cmd|CACHE_TTL| = 120 секунд.
+\end{enumerate}
+
+Так повторные запросы по одному городу не нагружают внешний API и
+обрабатываются быстрее, а через 120 секунд Redis сам удаляет ключ, и
+данные обновляются.
+
+Также добавлен эндпоинт \cmd|/cache/stats| (рисунок~\ref{fig:2-4}). Он
+находит в Redis все ключи погоды текущего владельца и возвращает их
+количество и список городов.
+
+\reportscreenshot{fig-2-4.png}{Эндпоинт статистики кэша}{fig:2-4}
+
+В переменные окружения приложения добавлены \cmd|REDIS_URL| и
+\cmd|CACHE_TTL| (рисунок~\ref{fig:2-5}). В \cmd|REDIS_URL| хостом
+указано имя сервиса \cmd|redis|, а портом --- порт, на котором Redis
+слушает внутри своего контейнера. Проброс порта 6467 на хост для связи
+приложения с Redis не нужен: контейнеры общаются напрямую по
+пользовательской сети, а встроенный DNS Docker сопоставляет имя сервиса
+с IP-адресом контейнера. Проброшенный порт нужен только для доступа к
+Redis с хоста.
+
+\reportscreenshot{fig-2-5.png}{Переменные окружения приложения}{fig:2-5}
+
+\section{Этап 3. Запуск и проверка полного стека}
+
+После пересборки все три сервиса запущены и находятся в состоянии
+\cmd|healthy| (рисунок~\ref{fig:3-1}): \cmd|ter-stepanyan-postgres|,
+\cmd|ter-stepanyan-assistant| и \cmd|ter-stepanyan-redis|. По
+выводу Compose видно, что \cmd|postgres| и \cmd|redis| стали
+\cmd|Healthy| через 5,6~с, а приложение запущено после них, через
+5,8~с.
+
+\reportscreenshot{fig-3-1.png}{Запуск полного стека}{fig:3-1}
+
+Логи всех сервисов представлены на рисунке~\ref{fig:3-2}. PostgreSQL и
+Redis сообщают о готовности принимать подключения
+(\cmd|database system is ready to accept connections| и
+\cmd|Ready to accept connections|), после чего стартует приложение.
+Предупреждение Redis \cmd|Memory overcommit must be enabled| относится
+к настройке ядра хоста и не влияет на работу кэша.
+
+\reportscreenshot{fig-3-2.png}{Логи сервисов}{fig:3-2}
+
+Первые строки лога приложения (рисунок~\ref{fig:3-3}) показывают запуск
+uvicorn на порту 8097. Строки \cmd|Waiting for application startup|
+относятся к подготовке самого приложения FastAPI. Ожидание базы и Redis
+выполняет Compose ещё до создания процесса приложения, поэтому в логах
+приложения оно не отображается.
+
+\reportscreenshot{fig-3-3.png}{Начало лога приложения}{fig:3-3}
+
+Проверка кэширования показана на рисунке~\ref{fig:3-4}. Первый запрос
+\cmd|/weather/Moscow| вернул данные с \cmd|"source": "api"|, второй
+такой же запрос --- с \cmd|"source": "cache"|. Эндпоинт
+\cmd|/cache/stats| показал владельца \cmd|ter-stepanyan| и город
+\cmd|moscow| в кэше. Команда \cmd|redis-cli KEYS| нашла ключ
+\cmd|weather:ter-stepanyan:moscow|, а команда \cmd|TTL| показала
+оставшееся время жизни ключа: сначала 11, затем 5 секунд. Ответ
+\cmd|-2| означает, что ключ уже удалён, так как истекло его время
+жизни (ответ \cmd|-1| означал бы ключ без срока жизни).
+
+\reportscreenshot{fig-3-4.png}{Проверка кэширования}{fig:3-4}
+
+Список сетей с моим префиксом приведён на рисунке~\ref{fig:3-5}.
+
+\reportscreenshot{fig-3-5.png}{Список сетей}{fig:3-5}
+
+Команда \cmd|docker network inspect ter-stepanyan-backend|
+(рисунок~\ref{fig:3-6}) показывает, что все три контейнера подключены к
+одной сети и получили адреса из её подсети \cmd|172.18.0.0/16|.
+
+\reportscreenshot{fig-3-6.png}{Три контейнера в сети ter-stepanyan-backend}{fig:3-6}
+
+Список томов приведён на рисунке~\ref{fig:3-7}: данные PostgreSQL
+хранятся в именованном томе \cmd|ter-stepanyan-pgdata|.
+
+\reportscreenshot{fig-3-7.png}{Список томов}{fig:3-7}
+
+\section{Этап 4. Масштабирование сервиса}
+
+Для масштабирования создан файл \cmd|docker-compose.scale.yml|
+(приложение~В). У сервиса \cmd|app| убран \cmd|container_name|,
+так как имя контейнера должно быть уникальным, а в \cmd|ports|
+указан только порт внутри контейнера \cmd|${APP_PORT}|. Порт на
+хосте Docker назначает каждому экземпляру сам, поэтому три копии не
+конфликтуют за один порт хоста. Внутри все экземпляры слушают порт 8097,
+что возможно, потому что у каждого контейнера свой сетевой стек.
+
+PostgreSQL и Redis в этой конфигурации описаны по шаблону задания:
+порты на хост не публикуются, и доступ к ним есть только у контейнеров
+внутри сети. Снаружи доступны только экземпляры приложения.
+
+Запуск трёх экземпляров командой
+\cmd|docker compose -f docker-compose.scale.yml up -d --build --scale app=3|
+показан на рисунке~\ref{fig:4-1}. Экземпляры
+\cmd|assist-py-app-1|, \cmd|-2| и \cmd|-3| получили порты
+хоста 32777, 32779 и 32778.
+
+\reportscreenshot{fig-4-1.png}{Три экземпляра приложения}{fig:4-1}
+
+Все три экземпляра отвечают на \cmd|/health| по своим портам
+(рисунок~\ref{fig:4-2}).
+
+\reportscreenshot{fig-4-2.png}{Проверка здоровья экземпляров}{fig:4-2}
+
+Проверка общего кэша показана на рисунке~\ref{fig:4-3}. Запрос
+\cmd|/weather/London| к первому экземпляру ушёл во внешний API
+(\cmd|"source": "api"|), а такой же запрос ко второму экземпляру
+вернул данные из кэша (\cmd|"source": "cache"|), хотя это другой
+контейнер. Третий экземпляр в \cmd|/cache/stats| показывает
+\cmd|london| в списке закэшированных городов. Это работает, потому что
+приложение не хранит состояние внутри себя: заметки находятся в
+PostgreSQL, а кэш --- в Redis, общих для всех экземпляров.
+
+\reportscreenshot{fig-4-3.png}{Общий кэш Redis для всех экземпляров}{fig:4-3}
+
+После проверки масштабированная конфигурация остановлена
+(рисунок~\ref{fig:4-4}), и запущена основная (рисунок~\ref{fig:4-5}).
+Compose снова дождался состояния \cmd|Healthy| у \cmd|redis| и
+\cmd|postgres| и только после этого запустил приложение.
+
+\reportscreenshot{fig-4-4.png}{Остановка масштабированной конфигурации}{fig:4-4}
+
+\reportscreenshot{fig-4-5.png}{Запуск основной конфигурации}{fig:4-5}
+
+\section{Этап 5. Финальный артефакт}
+
+\reportscreenshot{fig-5-1.png}{Финальный артефакт}{fig:5-1}
+
+\reportelement{Заключение}
+
+В ходе работы запуск приложения, PostgreSQL и Redis перенесён в Docker
+Compose: весь стек описан в одном файле и поднимается одной командой, а
+персональные параметры вынесены в \cmd|.env|. С помощью
+\cmd|healthcheck| и \cmd|depends_on| настроен порядок запуска:
+приложение стартует только после того, как база и Redis готовы принимать
+подключения.
+
+В приложение добавлено кэширование погоды в Redis с временем жизни
+120~секунд: повторный запрос по тому же городу возвращается из кэша без
+обращения к внешнему API. Проверено, что контейнеры общаются по
+пользовательской сети по именам сервисов, а проброс портов нужен только
+для доступа с хоста.
+
+При масштабировании три экземпляра приложения работали одновременно и
+использовали общий кэш Redis. Это показывает, что приложение можно
+масштабировать горизонтально, потому что его состояние вынесено в
+отдельные сервисы.
+
+
+
+\startreportappendices
+
+\reportappendix{Содержимое docker-compose.yml}
+
+\begin{code}
+services:
+  db:
+    image: postgres:15
+    container_name: ter-stepanyan-postgres
+    command: postgres -p ${PG_PORT}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ter-stepanyan-pgdata:/var/lib/postgresql/data
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -p ${PG_PORT}"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    container_name: ter-stepanyan-assistant
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+    environment:
+      APP_OWNER: ${APP_OWNER}
+      APP_SECRET: ${APP_SECRET}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${PG_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL: ${CACHE_TTL}
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ter-stepanyan-backend
+
+  redis:
+    image: redis:7-alpine
+    container_name: ter-stepanyan-redis
+    ports:
+      - "${REDIS_PORT}:6379"
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  ter-stepanyan-backend:
+    name: ter-stepanyan-backend
+    driver: bridge
+
+volumes:
+  ter-stepanyan-pgdata:
+    name: ter-stepanyan-pgdata
+\end{code}
+
+\reportappendix{Содержимое .env.example}
+
+\begin{code}
+APP_OWNER=ter-stepanyan
+APP_SECRET=
+APP_PORT=8097
+POSTGRES_USER=user_97
+POSTGRES_PASSWORD=
+POSTGRES_DB=assistant_97
+PG_PORT=5527
+REDIS_PORT=6467
+CACHE_TTL=120
+\end{code}
+
+\reportappendix{Содержимое docker-compose.scale.yml}
+
+\begin{code}
+services:
+  db:
+    image: postgres:15
+    container_name: ter-stepanyan-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ter-stepanyan-pgdata:/var/lib/postgresql/data
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ter-stepanyan-redis
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    ports:
+      - "${APP_PORT}"
+    environment:
+      APP_OWNER: ${APP_OWNER}
+      APP_SECRET: ${APP_SECRET}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL: ${CACHE_TTL}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ter-stepanyan-backend
+
+volumes:
+  ter-stepanyan-pgdata:
+
+networks:
+  ter-stepanyan-backend:
+    driver: bridge
+\end{code}
