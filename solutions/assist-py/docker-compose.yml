@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgres:15
+    container_name: ter-stepanyan-postgres
+    command: postgres -p ${PG_PORT}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ter-stepanyan-pgdata:/var/lib/postgresql/data
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -p ${PG_PORT}" ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s 
+      retries: 3
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    container_name: ter-stepanyan-assistant
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+    environment:
+      APP_OWNER: ${APP_OWNER}
+      APP_SECRET: ${APP_SECRET}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${PG_PORT}/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL: ${CACHE_TTL}
+    volumes:
+      - ./config:/app/config:ro 
+    depends_on:
+      db:
+        condition: service_healthy # ждет готовности 
+      redis:
+        condition: service_healthy
+    networks:
+      - ter-stepanyan-backend
+
+  redis: # ключ-значение
+    image: redis:7-alpine
+    container_name: ter-stepanyan-redis
+    ports:
+      - "${REDIS_PORT}:6379"
+    networks:
+      - ter-stepanyan-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  ter-stepanyan-backend:
+    name: ter-stepanyan-backend 
+    driver: bridge
+
+volumes:
+  ter-stepanyan-pgdata:
+    name: ter-stepanyan-pgdata
+
+
+
+
+      
+
